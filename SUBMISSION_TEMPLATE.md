@@ -2,11 +2,11 @@
 
 ## Candidate
 
-- **Name:**
-- **Email:**
-- **GitHub:**
-- **Selected problem:**
-- **Demo video:**
+- **Name:* Sonam Rai *
+- **Email:* sonamrai7935@gmail.com*
+- **GitHub:*https://github.com/caygnus/product-engineer-ps/tree/main/problems*
+- **Selected problem:*problem 3*
+- **Demo video:*https://drive.google.com/file/d/1sLeJwEYbOyY5gUtPFloXHrurDm9t8Uyh/view?usp=drivesdk*
 
 ## Run the project
 
