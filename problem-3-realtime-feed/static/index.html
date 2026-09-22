@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Realtime Feed Demo</title>
+<style>
+  :root {
+    --ink: #1b1f23;
+    --paper: #fafaf8;
+    --panel: #ffffff;
+    --line: #dcdfe3;
+    --connected: #1e7e34;
+    --reconnecting: #b06000;
+    --disconnected: #c5221f;
+    --accent: #2f5fa8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+  }
+  header {
+    padding: 18px 24px 8px;
+  }
+  header h1 { font-size: 20px; margin: 0 0 2px; }
+  header p { margin: 0; font-size: 13px; color: #666; }
+
+  .publish-bar {
+    display: flex;
+    gap: 8px;
+    padding: 12px 24px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .publish-bar input {
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .publish-bar input[name="room"] { width: 120px; }
+  .publish-bar input[name="content"] { flex: 1; min-width: 200px; }
+  .publish-bar button {
+    padding: 7px 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .clients {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 8px 24px 32px;
+  }
+  @media (max-width: 760px) {
+    .clients { grid-template-columns: 1fr; }
+  }
+
+  .client-panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .client-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .client-header h2 {
+    font-size: 14px;
+    margin: 0;
+    flex: 1;
+  }
+  .status-pill {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 20px;
+    letter-spacing: 0.02em;
+  }
+  .status-pill.CONNECTED { background: #e6f4ea; color: var(--connected); }
+  .status-pill.RECONNECTING { background: #fef3e0; color: var(--reconnecting); }
+  .status-pill.DISCONNECTED { background: #fce8e6; color: var(--disconnected); }
+
+  .client-controls {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .client-controls button {
+    font-size: 12px;
+    padding: 5px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: #fff;
+    cursor: pointer;
+  }
+  .client-controls button:disabled { opacity: 0.4; cursor: default; }
+
+  .meta-line {
+    font-size: 12px;
+    color: #666;
+  }
+
+  .log {
+    flex: 1;
+    min-height: 260px;
+    max-height: 340px;
+    overflow-y: auto;
+    background: #f4f5f7;
+    border-radius: 8px;
+    padding: 8px;
+    font-size: 12px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .log-entry { padding: 3px 6px; border-radius: 4px; }
+  .log-entry.update { background: #fff; border: 1px solid var(--line); }
+  .log-entry.duplicate { color: #999; }
+  .log-entry.system { color: var(--accent); font-style: italic; }
+  .log-entry .seq { color: #888; margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Realtime Feed</h1>
+  <p>Two independent clients against the same room - watch them stay in sync through disconnects.</p>
+</header>
+
+<form class="publish-bar" id="publish-form">
+  <input name="room" value="demo" />
+  <input name="content" placeholder="Write an update and hit publish..." />
+  <button type="submit">Publish</button>
+</form>
+
+<div class="clients">
+  <section class="client-panel" data-client="A"></section>
+  <section class="client-panel" data-client="B"></section>
+</div>
+
+<script>
+const MAX_BACKOFF_MS = 10000;
+const BASE_BACKOFF_MS = 500;
+const MAX_RECONNECT_ATTEMPTS = 8;
+
+class FeedClient {
+  constructor(panelEl, label) {
+    this.panel = panelEl;
+    this.label = label;
+    this.room = 'demo';
+    this.lastSeq = 0;
+    this.seenIds = new Set();
+    this.state = 'DISCONNECTED';
+    this.manualClose = false;
+    this.attempts = 0;
+    this.ws = null;
+    this.reconnectTimer = null;
+    this._buildUI();
+    this.connect();
+  }
+
+  _buildUI() {
+    this.panel.innerHTML = `
+      <div class="client-header">
+        <h2>Client ${this.label}</h2>
+        <span class="status-pill DISCONNECTED" data-role="status">DISCONNECTED</span>
+      </div>
+      <div class="meta-line" data-role="meta">last_seq: 0 · attempt: 0</div>
+      <div class="client-controls">
+        <button data-role="connect">Connect</button>
+        <button data-role="disconnect">Disconnect</button>
+        <button data-role="crash">Simulate drop</button>
+        <button data-role="reset">Reset cursor</button>
+      </div>
+      <div class="log" data-role="log"></div>
+    `;
+    this.panel.querySelector('[data-role="connect"]').onclick = () => this.connect();
+    this.panel.querySelector('[data-role="disconnect"]').onclick = () => this.disconnect();
+    this.panel.querySelector('[data-role="crash"]').onclick = () => this.simulateDrop();
+    this.panel.querySelector('[data-role="reset"]').onclick = () => this.resetCursor();
+  }
+
+  _setState(state) {
+    this.state = state;
+    const pill = this.panel.querySelector('[data-role="status"]');
+    pill.textContent = state;
+    pill.className = `status-pill ${state}`;
+    this._updateMeta();
+  }
+
+  _updateMeta() {
+    this.panel.querySelector('[data-role="meta"]').textContent =
+      `last_seq: ${this.lastSeq} · attempt: ${this.attempts} · room: ${this.room}`;
+  }
+
+  _log(text, kind) {
+    const log = this.panel.querySelector('[data-role="log"]');
+    const line = document.createElement('div');
+    line.className = `log-entry ${kind}`;
+    line.textContent = text;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  setRoom(room) {
+    if (room === this.room) return;
+    this.room = room;
+    this.resetCursor();
+  }
+
+  resetCursor() {
+    this.lastSeq = 0;
+    this.seenIds.clear();
+    this._log('cursor reset to 0', 'system');
+    this.disconnect();
+    this.connect();
+  }
+
+  connect() {
+    clearTimeout(this.reconnectTimer);
+    this.manualClose = false;
+    // Bumps on every connect() so a stale socket's late-arriving onclose
+    // (from a connection we've already replaced) can tell it's stale and
+    // no-op instead of stomping on the new one's state.
+    this.connectionToken = (this.connectionToken || 0) + 1;
+    const token = this.connectionToken;
+    const url = `ws://${location.host}/ws/${this.room}?last_seq=${this.lastSeq}`;
+    const ws = new WebSocket(url);
+    this.ws = ws;
+
+    ws.onopen = () => {
+      if (token !== this.connectionToken) return;
+      this.attempts = 0;
+      this._setState('CONNECTED');
+      this._log(`connected (resuming from seq ${this.lastSeq})`, 'system');
+    };
+
+    ws.onmessage = (event) => {
+      if (token !== this.connectionToken) return;
+      const update = JSON.parse(event.data);
+      if (this.seenIds.has(update.id)) {
+        this._log(`dup ignored: ${update.content}`, 'duplicate');
+        return;
+      }
+      this.seenIds.add(update.id);
+      this.lastSeq = Math.max(this.lastSeq, update.seq);
+      this._updateMeta();
+      this._log(`recv: ${update.content}`, 'update');
+      const entry = this.panel.querySelector('.log').lastElementChild;
+      const seqTag = document.createElement('span');
+      seqTag.className = 'seq';
+      seqTag.textContent = `#${update.seq}`;
+      entry.prepend(seqTag);
+    };
+
+    ws.onclose = () => {
+      if (token !== this.connectionToken) return;
+      if (this.manualClose) {
+        this._setState('DISCONNECTED');
+        this._log('disconnected (manual)', 'system');
+        return;
+      }
+      this._scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+      // onclose fires right after this - let that path handle reconnection
+    };
+  }
+
+  _scheduleReconnect() {
+    if (this.attempts >= MAX_RECONNECT_ATTEMPTS) {
+      this._setState('DISCONNECTED');
+      this._log('gave up after max attempts - click Connect to retry', 'system');
+      return;
+    }
+    this.attempts += 1;
+    this._setState('RECONNECTING');
+    const delay = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** (this.attempts - 1));
+    const jitter = Math.random() * delay * 0.2;
+    const wait = Math.round(delay + jitter);
+    this._log(`reconnecting in ${wait}ms (attempt ${this.attempts}/${MAX_RECONNECT_ATTEMPTS})`, 'system');
+    this._updateMeta();
+    this.reconnectTimer = setTimeout(() => this.connect(), wait);
+  }
+
+  disconnect() {
+    this.manualClose = true;
+    clearTimeout(this.reconnectTimer);
+    if (this.ws) this.ws.close();
+    this._setState('DISCONNECTED');
+  }
+
+  simulateDrop() {
+    // A close the app didn't ask for - onclose treats this like a real
+    // network blip and kicks off the backoff/reconnect cycle.
+    if (this.ws) this.ws.close(4000, 'simulated drop');
+  }
+}
+
+const clientA = new FeedClient(document.querySelector('[data-client="A"]'), 'A');
+const clientB = new FeedClient(document.querySelector('[data-client="B"]'), 'B');
+
+document.getElementById('publish-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const room = form.room.value.trim() || 'demo';
+  const content = form.content.value.trim();
+  if (!content) return;
+
+  clientA.setRoom(room);
+  clientB.setRoom(room);
+
+  await fetch(`/rooms/${room}/updates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  form.content.value = '';
+});
+</script>
+</body>
+</html>
